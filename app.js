@@ -28,7 +28,6 @@ const corsOptions = {
         const allowedOrigins = [
             'https://ece-23.vercel.app',
             'http://localhost:5173',
-            'http://localhost:3000'
         ];
         if (!origin || allowedOrigins.includes(origin) || origin.includes('ece-23-git')) {
             callback(null, origin);
