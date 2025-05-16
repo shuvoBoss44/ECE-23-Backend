@@ -24,7 +24,18 @@ const app = express();
 
 // CORS configuration
 const corsOptions = {
-    origin: process.env.FRONTEND_URL || 'http://localhost:5173',
+    origin: (origin, callback) => {
+        const allowedOrigins = [
+            'https://ece-23.vercel.app',
+            'http://localhost:5173',
+            'http://localhost:3000'
+        ];
+        if (!origin || allowedOrigins.includes(origin) || origin.includes('ece-23-git')) {
+            callback(null, origin);
+        } else {
+            callback(new Error('Not allowed by CORS'));
+        }
+    },
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization'],
     credentials: true,
@@ -45,7 +56,7 @@ app.use(helmet());
 app.use(limiter);
 app.use(express.json());
 app.use(cookieParser());
-app.use('/uploads', express.static('uploads'));
+// app.use('/uploads', express.static('uploads')); // Disabled for Vercel
 
 // MongoDB Connection
 mongoose.connect(process.env.MONGO_URI)
@@ -159,10 +170,11 @@ app.post(
             const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: '15d' });
             const cookieOptions = {
                 httpOnly: true,
-                secure: process.env.NODE_ENV === 'production',
+                secure: process.env.NODE_ENV === 'production' ? true : false,
                 sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
                 maxAge: 15 * 24 * 60 * 60 * 1000, // 15 days
                 path: '/',
+                domain: process.env.NODE_ENV === 'production' ? '.vercel.app' : undefined,
             };
             res.cookie('token', token, cookieOptions);
             console.log('Login successful for roll:', roll, 'Cookie set with token');
@@ -208,11 +220,13 @@ app.post(
 );
 
 app.get('/api/users', async (req, res) => {
+    console.log('Fetching users...');
     try {
         const users = await User.find().select('-password');
+        console.log('Users fetched:', users.length);
         res.json(users);
     } catch (err) {
-        console.error('Users fetch error:', err);
+        console.error('Users fetch error:', err.message, err.stack);
         res.status(500).json({ message: err.message });
     }
 });
@@ -254,9 +268,10 @@ app.get(
 app.post('/api/users/logout', (req, res) => {
     res.clearCookie('token', {
         httpOnly: true,
-        secure: process.env.NODE_ENV === 'production',
+        secure: process.env.NODE_ENV === 'production' ? true : false,
         sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
         path: '/',
+        domain: process.env.NODE_ENV === 'production' ? '.vercel.app' : undefined,
     });
     console.log('Logout: Cookie cleared');
     res.json({ message: 'Logout successful' });
