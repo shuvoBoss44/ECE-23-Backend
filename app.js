@@ -16,7 +16,7 @@ dotenv.config();
 // Verify environment variables
 console.log('MONGO_URI:', process.env.MONGO_URI ? 'Set' : 'Missing');
 console.log('JWT_SECRET:', process.env.JWT_SECRET ? 'Set' : 'Missing');
-console.log('PORT:', process.env.PORT || 8000);
+console.log('FRONTEND_URL:', process.env.FRONTEND_URL ? 'Set' : 'Missing');
 console.log('NODE_ENV:', process.env.NODE_ENV || 'development');
 
 // Initialize Express
@@ -24,13 +24,14 @@ const app = express();
 
 // CORS configuration
 const corsOptions = {
-    origin: 'http://localhost:5173',
+    origin: process.env.FRONTEND_URL || 'http://localhost:5173',
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization'],
     credentials: true,
     preflightContinue: false,
     optionsSuccessStatus: 204,
 };
+app.use(cors(corsOptions));
 
 // Rate limiting
 const limiter = rateLimit({
@@ -42,7 +43,6 @@ const limiter = rateLimit({
 app.use(morgan('dev'));
 app.use(helmet());
 app.use(limiter);
-app.use(cors(corsOptions));
 app.use(express.json());
 app.use(cookieParser());
 app.use('/uploads', express.static('uploads'));
@@ -68,7 +68,7 @@ const userSchema = new mongoose.Schema({
     },
     image: { type: String, required: true },
     password: { type: String, required: true },
-    canAnnounce: { type: Boolean, default: false }, // New field
+    canAnnounce: { type: Boolean, default: false },
 }, { timestamps: true });
 
 userSchema.pre("save", async function (next) {
@@ -543,6 +543,4 @@ app.use((err, req, res, next) => {
     res.status(500).json({ message: 'Internal server error' });
 });
 
-// Start Server
-const PORT = process.env.PORT || 8000;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+module.exports = app;
