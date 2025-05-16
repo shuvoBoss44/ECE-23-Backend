@@ -143,6 +143,9 @@ const isValidGoogleDriveUrl = (url) => {
 };
 
 // User Routes
+app.get((req, res) => {
+    res.json("hello world");
+})
 app.post(
     '/api/users/login',
     [
