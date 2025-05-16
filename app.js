@@ -561,4 +561,8 @@ app.use((err, req, res, next) => {
     res.status(500).json({ message: 'Internal server error' });
 });
 
+app.listen(process.env.PORT, () => {
+    console.log(`server is running at ${process.env.PORT}`)
+})
+
 module.exports = app;
