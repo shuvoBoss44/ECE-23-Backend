@@ -9,6 +9,7 @@ const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const { body, param, validationResult } = require('express-validator');
 const morgan = require('morgan');
+const winston = require('winston');
 
 // Load environment variables
 dotenv.config();
@@ -24,16 +25,35 @@ if (missingVars.length > 0) {
 // Initialize Express
 const app = express();
 
+// Logger setup
+const logger = winston.createLogger({
+    level: 'info',
+    format: winston.format.combine(
+        winston.format.timestamp(),
+        winston.format.json()
+    ),
+    transports: [
+        new winston.transports.File({ filename: 'error.log', level: 'error' }),
+        new winston.transports.File({ filename: 'combined.log' }),
+    ],
+});
+if (process.env.NODE_ENV !== 'production') {
+    logger.add(new winston.transports.Console({
+        format: winston.format.simple(),
+    }));
+}
+
 // CORS configuration
 const corsOptions = {
     origin: (origin, callback) => {
         const allowedOrigins = process.env.NODE_ENV === 'production'
-            ? ['https://ece-23.vercel.app', 'https://yourapp.onrender.com']
-            : ['http://localhost:5173'];
+            ? [process.env.FRONTEND_URL, 'https://ece-23.vercel.app']
+            : ['http://localhost:5173', 'http://localhost:3000'];
         if (!origin || allowedOrigins.includes(origin)) {
             callback(null, true);
         } else {
-            callback(new Error('Not allowed by CORS'));
+            logger.warn(`CORS rejected origin: ${origin}`);
+            callback(new Error(`CORS policy: Origin ${origin} not allowed`));
         }
     },
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
@@ -46,37 +66,49 @@ app.use(cors(corsOptions));
 // Rate limiting
 const limiter = rateLimit({
     windowMs: 15 * 60 * 1000, // 15 minutes
-    max: 200, // Increased to 200 for better UX
-    message: { message: 'Too many requests from this IP, please try again later.' },
+    max: 200,
+    keyGenerator: (req) => req.user?._id?.toString() || req.ip,
+    message: (req, res) => ({
+        message: 'Too many requests, please try again later.',
+        retryAfter: res.getHeader('Retry-After'),
+    }),
 });
+app.use(limiter);
 
 // Middleware
-app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
+app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev', {
+    stream: { write: (message) => logger.info(message.trim()) },
+}));
 app.use(helmet({
-    contentSecurityPolicy: {
+    contentSecurityPolicy: process.env.NODE_ENV === 'production' ? {
         directives: {
             defaultSrc: ["'self'"],
-            styleSrc: ["'self'", "'unsafe-inline'"],
-            scriptSrc: ["'self'"],
+            styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
+            scriptSrc: ["'self'", 'https://ece-23.vercel.app'],
+            connectSrc: ["'self'", 'https://ece-23-backend.onrender.com', 'https://ece-23.vercel.app'],
+            frameSrc: ['https://drive.google.com'],
         },
-    },
+    } : false,
 }));
-app.use(limiter);
-app.use(express.json({ limit: '10kb' })); // Limit JSON payload size
+app.use(express.json({ limit: '10kb' }));
 app.use(cookieParser());
 
-// MongoDB Connection
-mongoose.connect(process.env.MONGO_URI, {
-    connectTimeoutMS: 10000,
-    socketTimeoutMS: 45000,
-    maxPoolSize: 10,
-    retryWrites: true,
-    writeConcern: { w: 'majority' },
-}).then(() => console.log('MongoDB connected'))
-    .catch((err) => {
-        console.error('MongoDB connection error:', err);
-        process.exit(1);
+// MongoDB Connection with retry
+const connectWithRetry = () => {
+    mongoose.connect(process.env.MONGO_URI, {
+        connectTimeoutMS: 10000,
+        socketTimeoutMS: 45000,
+        maxPoolSize: 10,
+        retryWrites: true,
+        writeConcern: { w: 'majority' },
+    }).then(() => {
+        logger.info('MongoDB connected');
+    }).catch((err) => {
+        logger.error('MongoDB connection error:', err.message);
+        setTimeout(connectWithRetry, 5000);
     });
+};
+connectWithRetry();
 
 // User Schema
 const userSchema = new mongoose.Schema({
@@ -135,14 +167,13 @@ const Announcement = mongoose.model('Announcement', announcementSchema);
 
 // Authentication Middleware
 const authMiddleware = async (req, res, next) => {
-    let token = req.cookies.token; // Prioritize cookie
-    if (!token && req.header('Authorization')) {
-        token = req.header('Authorization').replace('Bearer ', '');
-    }
-    if (!token) {
-        return res.status(401).json({ message: 'No token, authorization denied' });
-    }
+    let token;
     try {
+        token = req.cookies.token || (req.header('Authorization')?.replace('Bearer ', ''));
+        logger.info(`Token received: ${token ? 'present' : 'missing'}`);
+        if (!token) {
+            return res.status(401).json({ message: 'No token, authorization denied' });
+        }
         const decoded = jwt.verify(token, process.env.JWT_SECRET);
         req.user = await User.findById(decoded.id).select('-password');
         if (!req.user) {
@@ -150,7 +181,7 @@ const authMiddleware = async (req, res, next) => {
         }
         next();
     } catch (err) {
-        console.error('Token verification failed:', err.message);
+        logger.error(`Token verification failed: ${err.message}, Token: ${token}`);
         res.status(401).json({ message: 'Token is not valid' });
     }
 };
@@ -174,7 +205,7 @@ app.post(
     async (req, res) => {
         const errors = validationResult(req);
         if (!errors.isEmpty()) {
-            return res.status(400).json({ errors: errors.array() });
+            return res.status(400).json({ message: 'Validation error', errors: errors.array() });
         }
         const { roll, password } = req.body;
         try {
@@ -191,17 +222,18 @@ app.post(
                 httpOnly: true,
                 secure: process.env.NODE_ENV === 'production',
                 sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
-                maxAge: 15 * 24 * 60 * 60 * 1000, // 15 days
+                maxAge: 15 * 24 * 60 * 60 * 1000,
                 path: '/',
             };
             res.cookie('token', token, cookieOptions);
+            logger.info(`Cookie set for user: ${roll}, Token: ${token.substring(0, 10)}...`);
             res.json({
                 message: 'Login successful',
                 user: { ...user._doc, password: undefined },
                 token,
             });
         } catch (err) {
-            console.error('Login error:', err.message);
+            logger.error(`Login error for roll ${roll}: ${err.message}`);
             res.status(500).json({ message: 'Server error during login' });
         }
     }
@@ -217,7 +249,7 @@ app.post(
     async (req, res) => {
         const errors = validationResult(req);
         if (!errors.isEmpty()) {
-            return res.status(400).json({ errors: errors.array() });
+            return res.status(400).json({ message: 'Validation error', errors: errors.array() });
         }
         const { currentPassword, newPassword } = req.body;
         try {
@@ -226,11 +258,11 @@ app.post(
             if (!isMatch) {
                 return res.status(400).json({ message: 'Current password is incorrect' });
             }
-            user.password = newPassword; // Will be hashed by pre-save hook
+            user.password = newPassword;
             await user.save();
             res.json({ message: 'Password updated successfully' });
         } catch (err) {
-            console.error('Password update error:', err);
+            logger.error(`Password update error for user ${req.user._id}: ${err.message}`);
             res.status(500).json({ message: 'Server error' });
         }
     }
@@ -241,7 +273,7 @@ app.get('/api/users', async (req, res) => {
         const users = await User.find().select('-password');
         res.json(users);
     } catch (err) {
-        console.error('Users fetch error:', err.message);
+        logger.error(`Users fetch error: ${err.message}`);
         res.status(500).json({ message: 'Server error' });
     }
 });
@@ -250,7 +282,7 @@ app.get('/api/users/me', authMiddleware, async (req, res) => {
     try {
         res.json(req.user);
     } catch (err) {
-        console.error('User fetch error:', err);
+        logger.error(`User fetch error for ID ${req.user._id}: ${err.message}`);
         res.status(500).json({ message: 'Server error' });
     }
 });
@@ -261,7 +293,7 @@ app.get(
     async (req, res) => {
         const errors = validationResult(req);
         if (!errors.isEmpty()) {
-            return res.status(400).json({ errors: errors.array() });
+            return res.status(400).json({ message: 'Validation error', errors: errors.array() });
         }
         const { roll } = req.params;
         try {
@@ -271,7 +303,7 @@ app.get(
             }
             res.json(user);
         } catch (err) {
-            console.error('User fetch error for roll:', roll, err.message);
+            logger.error(`User fetch error for roll ${roll}: ${err.message}`);
             res.status(500).json({ message: 'Server error' });
         }
     }
@@ -284,6 +316,7 @@ app.post('/api/users/logout', (req, res) => {
         sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
         path: '/',
     });
+    logger.info('User logged out, cookie cleared');
     res.json({ message: 'Logout successful' });
 });
 
@@ -301,10 +334,14 @@ app.post(
     async (req, res) => {
         const errors = validationResult(req);
         if (!errors.isEmpty()) {
-            return res.status(400).json({ errors: errors.array() });
+            return res.status(400).json({ message: 'Validation error', errors: errors.array() });
         }
         const { title, semester, courseNo, pdf } = req.body;
         try {
+            const existingNote = await Note.findOne({ userId: req.user._id, title, semester, courseNo });
+            if (existingNote) {
+                return res.status(400).json({ message: 'Note with this title, semester, and course already exists' });
+            }
             const note = new Note({
                 userId: req.user._id,
                 title,
@@ -315,7 +352,7 @@ app.post(
             await note.save();
             res.status(201).json(note);
         } catch (err) {
-            console.error('Note creation error:', err);
+            logger.error(`Note creation error for user ${req.user._id}: ${err.message}`);
             res.status(400).json({ message: 'Server error' });
         }
     }
@@ -329,12 +366,12 @@ app.put(
         body('title').optional().notEmpty().trim().withMessage('Title cannot be empty'),
         body('semester').optional().notEmpty().trim().withMessage('Semester cannot be empty'),
         body('courseNo').optional().notEmpty().trim().withMessage('Course number cannot be empty'),
-        body('pdf').optional().trim().custom((value) => isValidGoogleDriveUrl(value)).withMessage('Invalid Google Drive URL'),
+        body('pdf').optional().trim().custom((value) => !value || isValidGoogleDriveUrl(value)).withMessage('Invalid Google Drive URL'),
     ],
     async (req, res) => {
         const errors = validationResult(req);
         if (!errors.isEmpty()) {
-            return res.status(400).json({ errors: errors.array() });
+            return res.status(400).json({ message: 'Validation error', errors: errors.array() });
         }
         const { title, semester, courseNo, pdf } = req.body;
         try {
@@ -353,7 +390,7 @@ app.put(
             await note.save();
             res.json(note);
         } catch (err) {
-            console.error('Note update error:', err);
+            logger.error(`Note update error for ID ${req.params.id}: ${err.message}`);
             res.status(400).json({ message: 'Server error' });
         }
     }
@@ -381,7 +418,7 @@ app.get('/api/notes', async (req, res) => {
             pages: Math.ceil(total / limit),
         });
     } catch (err) {
-        console.error('Notes fetch error:', err);
+        logger.error(`Notes fetch error: ${err.message}`);
         res.status(500).json({ message: 'Server error' });
     }
 });
@@ -392,7 +429,7 @@ app.get(
     async (req, res) => {
         const errors = validationResult(req);
         if (!errors.isEmpty()) {
-            return res.status(400).json({ errors: errors.array() });
+            return res.status(400).json({ message: 'Validation error', errors: errors.array() });
         }
         try {
             const page = parseInt(req.query.page) || 1;
@@ -411,7 +448,7 @@ app.get(
                 pages: Math.ceil(total / limit),
             });
         } catch (err) {
-            console.error('User notes fetch error:', err);
+            logger.error(`User notes fetch error for user ${req.params.userId}: ${err.message}`);
             res.status(500).json({ message: 'Server error' });
         }
     }
@@ -424,7 +461,7 @@ app.delete(
     async (req, res) => {
         const errors = validationResult(req);
         if (!errors.isEmpty()) {
-            return res.status(400).json({ errors: errors.array() });
+            return res.status(400).json({ message: 'Validation error', errors: errors.array() });
         }
         try {
             const note = await Note.findById(req.params.id);
@@ -437,7 +474,7 @@ app.delete(
             await Note.findByIdAndDelete(req.params.id);
             res.json({ message: 'Note deleted' });
         } catch (err) {
-            console.error('Note delete error:', err);
+            logger.error(`Note delete error for ID ${req.params.id}: ${err.message}`);
             res.status(500).json({ message: 'Server error' });
         }
     }
@@ -454,7 +491,7 @@ app.post(
     async (req, res) => {
         const errors = validationResult(req);
         if (!errors.isEmpty()) {
-            return res.status(400).json({ errors: errors.array() });
+            return res.status(400).json({ message: 'Validation error', errors: errors.array() });
         }
         try {
             const user = await User.findById(req.user._id);
@@ -470,7 +507,7 @@ app.post(
             await announcement.save();
             res.status(201).json(announcement);
         } catch (err) {
-            console.error('Announcement creation error:', err);
+            logger.error(`Announcement creation error for user ${req.user._id}: ${err.message}`);
             res.status(500).json({ message: 'Server error' });
         }
     }
@@ -494,10 +531,11 @@ app.get('/api/announcements', async (req, res) => {
             pages: Math.ceil(total / limit),
         });
     } catch (err) {
-        console.error('Announcements fetch error:', err);
+        logger.error(`Announcements fetch error: ${err.message}`);
         res.status(500).json({ message: 'Server error' });
     }
-});
+}
+);
 
 app.put(
     '/api/announcements/:id',
@@ -510,7 +548,7 @@ app.put(
     async (req, res) => {
         const errors = validationResult(req);
         if (!errors.isEmpty()) {
-            return res.status(400).json({ errors: errors.array() });
+            return res.status(400).json({ message: 'Validation error', errors: errors.array() });
         }
         try {
             const announcement = await Announcement.findById(req.params.id);
@@ -527,7 +565,7 @@ app.put(
             await announcement.save();
             res.json(announcement);
         } catch (err) {
-            console.error('Announcement update error:', err);
+            logger.error(`Announcement update error for ID ${req.params.id}: ${err.message}`);
             res.status(500).json({ message: 'Server error' });
         }
     }
@@ -540,7 +578,7 @@ app.delete(
     async (req, res) => {
         const errors = validationResult(req);
         if (!errors.isEmpty()) {
-            return res.status(400).json({ errors: errors.array() });
+            return res.status(400).json({ message: 'Validation error', errors: errors.array() });
         }
         try {
             const announcement = await Announcement.findById(req.params.id);
@@ -553,7 +591,7 @@ app.delete(
             await Announcement.findByIdAndDelete(req.params.id);
             res.json({ message: 'Announcement deleted' });
         } catch (err) {
-            console.error('Announcement delete error:', err);
+            logger.error(`Announcement delete error for ID ${req.params.id}: ${err.message}`);
             res.status(500).json({ message: 'Server error' });
         }
     }
@@ -561,7 +599,11 @@ app.delete(
 
 // Global error handler
 app.use((err, req, res, next) => {
-    console.error('Global error:', err.stack);
+    logger.error(`Global error: ${err.message}, Stack: ${err.stack}`);
+    res.setHeader('Content-Type', 'application/json');
+    if (err.message.includes('CORS')) {
+        return res.status(403).json({ message: err.message });
+    }
     if (err.name === 'ValidationError') {
         return res.status(400).json({ message: 'Validation error', errors: err.errors });
     }
@@ -574,7 +616,7 @@ app.use((err, req, res, next) => {
 // Bind to Render's port and host
 const port = process.env.PORT || 3000;
 app.listen(port, '0.0.0.0', () => {
-    console.log(`Server is running on port ${port}`);
+    logger.info(`Server is running on port ${port}`);
 });
 
 module.exports = app;
