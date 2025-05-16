@@ -24,21 +24,12 @@ const app = express();
 
 // CORS configuration
 const corsOptions = {
-    origin: (origin, callback) => {
-        const allowedOrigins = [
-            'https://ece-23.vercel.app',
-            'http://localhost:5173',
-        ];
-        if (!origin || allowedOrigins.includes(origin) || origin.includes('ece-23-git')) {
-            callback(null, origin);
-        } else {
-            callback(new Error('Not allowed by CORS'));
-        }
-    },
+    origin: process.env.NODE_ENV === 'production'
+        ? ['https://ece-23.vercel.app', 'https://yourapp.onrender.com']
+        : ['http://localhost:5173'],
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization'],
     credentials: true,
-    preflightContinue: false,
     optionsSuccessStatus: 204,
 };
 app.use(cors(corsOptions));
@@ -50,15 +41,20 @@ const limiter = rateLimit({
 });
 
 // Middleware
-app.use(morgan('dev'));
+app.use(morgan('combined')); // More detailed logs for debugging
 app.use(helmet());
 app.use(limiter);
 app.use(express.json());
 app.use(cookieParser());
-// app.use('/uploads', express.static('uploads')); // Disabled for Vercel
 
 // MongoDB Connection
-mongoose.connect(process.env.MONGO_URI)
+mongoose.connect(process.env.MONGO_URI, {
+    connectTimeoutMS: 10000,
+    socketTimeoutMS: 45000,
+    maxPoolSize: 10,
+    retryWrites: true,
+    w: 'majority',
+})
     .then(() => console.log('MongoDB connected'))
     .catch(err => console.error('MongoDB connection error:', err));
 
@@ -144,7 +140,8 @@ const isValidGoogleDriveUrl = (url) => {
 // User Routes
 app.get("/", (req, res) => {
     res.json("hello world");
-})
+});
+
 app.post(
     '/api/users/login',
     [
@@ -172,11 +169,10 @@ app.post(
             const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: '15d' });
             const cookieOptions = {
                 httpOnly: true,
-                secure: process.env.NODE_ENV === 'production' ? true : false,
+                secure: process.env.NODE_ENV === 'production',
                 sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
                 maxAge: 15 * 24 * 60 * 60 * 1000, // 15 days
                 path: '/',
-                domain: process.env.NODE_ENV === 'production' ? '.vercel.app' : undefined,
             };
             res.cookie('token', token, cookieOptions);
             console.log('Login successful for roll:', roll, 'Cookie set with token');
@@ -270,10 +266,9 @@ app.get(
 app.post('/api/users/logout', (req, res) => {
     res.clearCookie('token', {
         httpOnly: true,
-        secure: process.env.NODE_ENV === 'production' ? true : false,
+        secure: process.env.NODE_ENV === 'production',
         sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
         path: '/',
-        domain: process.env.NODE_ENV === 'production' ? '.vercel.app' : undefined,
     });
     console.log('Logout: Cookie cleared');
     res.json({ message: 'Logout successful' });
@@ -557,11 +552,13 @@ app.delete(
 // Global error handler
 app.use((err, req, res, next) => {
     console.error('Global error:', err.stack);
-    res.status(500).json({ message: 'Internal server error' });
+    res.status(500).json({ message: 'Internal server error', error: err.message }); // Include error for debugging
 });
 
-app.listen(process.env.PORT, () => {
-    console.log(`server is running at ${process.env.PORT}`)
-})
+// Bind to Render's port and host
+const port = process.env.PORT || 3000;
+app.listen(port, '0.0.0.0', () => {
+    console.log(`Server is running on port ${port}`);
+});
 
 module.exports = app;
