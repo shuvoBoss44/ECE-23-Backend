@@ -9,7 +9,6 @@ const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const { body, param, validationResult } = require('express-validator');
 const morgan = require('morgan');
-const NodeCache = require('node-cache'); // New dependency for caching
 
 // Load environment variables
 dotenv.config();
@@ -35,42 +34,20 @@ const corsOptions = {
 };
 app.use(cors(corsOptions));
 
-// Initialize cache
-const cache = new NodeCache({ stdTTL: 900, checkperiod: 120 }); // Cache for 15 min
-
 // Rate limiting
-const generalLimiter = rateLimit({
+const limiter = rateLimit({
     windowMs: 15 * 60 * 1000, // 15 minutes
-    max: 100, // 100 requests per IP
-    standardHeaders: true, // Add Ratelimit-* and Retry-After headers
-    legacyHeaders: false,
-    message: 'Too many requests from this IP, please try again later.',
-    handler: (req, res, next, options) => {
-        console.log(`Rate limit hit for IP: ${req.ip}, Path: ${req.path}`);
-        res.status(options.statusCode).json({ message: options.message });
-    },
-});
-
-const userMeLimiter = rateLimit({
-    windowMs: 15 * 60 * 1000, // 15 minutes
-    max: 500, // More lenient: 500 requests per IP
-    standardHeaders: true,
-    legacyHeaders: false,
-    message: 'Too many requests to /api/users/me, please try again later.',
-    handler: (req, res, next, options) => {
-        console.log(`Rate limit hit for /api/users/me, IP: ${req.ip}`);
-        res.status(options.statusCode).json({ message: options.message });
-    },
+    max: 100, // Limit each IP to 100 requests
 });
 
 // Middleware
 app.use(morgan('combined')); // More detailed logs for debugging
 app.use(helmet());
-app.use(generalLimiter); // Apply general limiter to all routes
+app.use(limiter);
 app.use(express.json());
 app.use(cookieParser());
 
-// MongoDB Connection (unchanged)
+// MongoDB Connection
 mongoose.connect(process.env.MONGO_URI, {
     connectTimeoutMS: 10000,
     socketTimeoutMS: 45000,
@@ -81,7 +58,7 @@ mongoose.connect(process.env.MONGO_URI, {
     .then(() => console.log('MongoDB connected'))
     .catch(err => console.error('MongoDB connection error:', err));
 
-// User Schema (unchanged)
+// User Schema
 const userSchema = new mongoose.Schema({
     name: { type: String, required: true },
     roll: { type: String, required: true, unique: true },
@@ -112,7 +89,7 @@ userSchema.methods.comparePassword = async function (password) {
 
 const User = mongoose.model('User', userSchema);
 
-// Note Schema (unchanged)
+// Note Schema
 const noteSchema = new mongoose.Schema({
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
     title: { type: String, required: true },
@@ -123,7 +100,7 @@ const noteSchema = new mongoose.Schema({
 
 const Note = mongoose.model('Note', noteSchema);
 
-// Announcement Schema (unchanged)
+// Announcement Schema
 const announcementSchema = new mongoose.Schema({
     title: { type: String, required: true, trim: true },
     content: { type: String, required: true, trim: true },
@@ -132,7 +109,7 @@ const announcementSchema = new mongoose.Schema({
 
 const Announcement = mongoose.model('Announcement', announcementSchema);
 
-// Authentication Middleware (unchanged)
+// Authentication Middleware
 const authMiddleware = async (req, res, next) => {
     const token = req.header('Authorization')?.replace('Bearer ', '') || req.cookies.token;
     console.log('AuthMiddleware - Token:', token);
@@ -155,20 +132,14 @@ const authMiddleware = async (req, res, next) => {
     }
 };
 
-// Validate Google Drive URL (unchanged)
+// Validate Google Drive URL
 const isValidGoogleDriveUrl = (url) => {
     return /^https:\/\/(drive\.google\.com\/file\/d\/|docs\.google\.com\/.*id=)[a-zA-Z0-9_-]+/.test(url);
 };
 
-// User Routes (only /api/users/me and /ping modified, others unchanged)
+// User Routes
 app.get("/", (req, res) => {
     res.json("hello world");
-});
-
-// Keep-alive endpoint to prevent spin-down
-app.get('/ping', (req, res) => {
-    console.log(`Ping received from IP: ${req.ip}`);
-    res.status(200).json({ status: 'alive' });
 });
 
 app.post(
@@ -258,26 +229,12 @@ app.get('/api/users', async (req, res) => {
     }
 });
 
-app.get('/api/users/me', userMeLimiter, authMiddleware, async (req, res) => {
+app.get('/api/users/me', authMiddleware, async (req, res) => {
     try {
-        const cacheKey = `user_${req.user._id}`;
-        const cachedUser = cache.get(cacheKey);
-        if (cachedUser) {
-            console.log(`Cache hit for user: ${req.user.roll}`);
-            return res.json(cachedUser);
-        }
-        console.log(`Cache miss for user: ${req.user.roll}, fetching from DB`);
-        const user = await User.findById(req.user._id).select('-password');
-        if (!user) {
-            console.log('User fetch: No user found for ID:', req.user._id);
-            return res.status(404).json({ message: 'User not found' });
-        }
-        cache.set(cacheKey, user, 900); // Cache for 15 min
-        console.log(`User fetched and cached: ${req.user.roll}`);
-        res.json(user);
+        res.json(req.user);
     } catch (err) {
-        console.error('User fetch error:', err.message, err.stack);
-        res.status(500).json({ message: 'Server error' });
+        console.error('User fetch error:', err);
+        res.status(500).json({ message: err.message });
     }
 });
 
@@ -317,7 +274,7 @@ app.post('/api/users/logout', (req, res) => {
     res.json({ message: 'Logout successful' });
 });
 
-// Note Routes (unchanged)
+// Note Routes
 app.post(
     '/api/notes',
     authMiddleware,
@@ -476,7 +433,7 @@ app.delete(
     }
 );
 
-// Announcement Routes (unchanged)
+// Announcement Routes
 app.post(
     '/api/announcements',
     authMiddleware,
@@ -595,7 +552,7 @@ app.delete(
 // Global error handler
 app.use((err, req, res, next) => {
     console.error('Global error:', err.stack);
-    res.status(500).json({ message: 'Internal server error', error: err.message });
+    res.status(500).json({ message: 'Internal server error', error: err.message }); // Include error for debugging
 });
 
 // Bind to Render's port and host
