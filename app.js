@@ -10,19 +10,15 @@ const rateLimit = require('express-rate-limit');
 const { body, param, validationResult } = require('express-validator');
 const morgan = require('morgan');
 
-// Load environment variables
 dotenv.config();
 
-// Verify environment variables
 console.log('MONGO_URI:', process.env.MONGO_URI ? 'Set' : 'Missing');
 console.log('JWT_SECRET:', process.env.JWT_SECRET ? 'Set' : 'Missing');
 console.log('FRONTEND_URL:', process.env.FRONTEND_URL ? 'Set' : 'Missing');
 console.log('NODE_ENV:', process.env.NODE_ENV || 'development');
 
-// Initialize Express
 const app = express();
 
-// CORS configuration
 const corsOptions = {
     origin: process.env.NODE_ENV === 'production'
         ? ['https://ece-23.vercel.app', 'https://yourapp.onrender.com']
@@ -34,11 +30,9 @@ const corsOptions = {
 };
 app.use(cors(corsOptions));
 
-// Rate limiting configurations
-// Global rate limiter
 const globalLimiter = rateLimit({
-    windowMs: 15 * 60 * 1000, // 15 minutes
-    max: 200, // 200 requests per IP
+    windowMs: 15 * 60 * 1000,
+    max: 200,
     message: {
         message: 'Too many requests from this IP, please try again after 15 minutes.',
     },
@@ -46,10 +40,9 @@ const globalLimiter = rateLimit({
     legacyHeaders: false,
 });
 
-// Specific rate limiter for /api/users/me
 const userMeLimiter = rateLimit({
-    windowMs: 10 * 60 * 1000, // 10 minutes
-    max: 50, // 50 requests per IP
+    windowMs: 10 * 60 * 1000,
+    max: 50,
     message: {
         message: 'Too many requests to fetch user data, please try again after 10 minutes.',
     },
@@ -57,10 +50,9 @@ const userMeLimiter = rateLimit({
     legacyHeaders: false,
 });
 
-// Specific rate limiter for /api/notes
 const notesLimiter = rateLimit({
-    windowMs: 10 * 60 * 1000, // 10 minutes
-    max: 100, // 100 requests per IP
+    windowMs: 10 * 60 * 1000,
+    max: 100,
     message: {
         message: 'Too many requests to notes endpoint, please try again after 10 minutes.',
     },
@@ -68,14 +60,12 @@ const notesLimiter = rateLimit({
     legacyHeaders: false,
 });
 
-// Middleware
 app.use(morgan('combined'));
 app.use(helmet());
 app.use(globalLimiter);
 app.use(express.json());
 app.use(cookieParser());
 
-// MongoDB Connection
 mongoose.connect(process.env.MONGO_URI, {
     connectTimeoutMS: 10000,
     socketTimeoutMS: 45000,
@@ -86,7 +76,6 @@ mongoose.connect(process.env.MONGO_URI, {
     .then(() => console.log('MongoDB connected'))
     .catch(err => console.error('MongoDB connection error:', err));
 
-// User Schema
 const userSchema = new mongoose.Schema({
     name: { type: String, required: true },
     roll: { type: String, required: true, unique: true },
@@ -117,20 +106,17 @@ userSchema.methods.comparePassword = async function (password) {
 
 const User = mongoose.model('User', userSchema);
 
-// Note Schema with isImportantLink field
 const noteSchema = new mongoose.Schema({
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
     title: { type: String, required: true },
     semester: { type: String },
     courseNo: { type: String },
-    fileType: { type: String, enum: ['pdf', 'ppt', 'pptx', 'doc', 'docx'], required: true },
     fileUrl: { type: String, required: true },
     isImportantLink: { type: Boolean, default: false },
 }, { timestamps: true });
 
 const Note = mongoose.model('Note', noteSchema);
 
-// Announcement Schema
 const announcementSchema = new mongoose.Schema({
     title: { type: String, required: true, trim: true },
     content: { type: String, required: true, trim: true },
@@ -139,7 +125,6 @@ const announcementSchema = new mongoose.Schema({
 
 const Announcement = mongoose.model('Announcement', announcementSchema);
 
-// Authentication Middleware
 const authMiddleware = async (req, res, next) => {
     const token = req.header('Authorization')?.replace('Bearer ', '') || req.cookies.token;
     console.log('AuthMiddleware - Token:', token ? 'Present' : 'Missing');
@@ -162,12 +147,10 @@ const authMiddleware = async (req, res, next) => {
     }
 };
 
-// Validate Google Drive URL
 const isValidGoogleDriveUrl = (url) => {
     return /^https:\/\/(drive\.google\.com\/file\/d\/|docs\.google\.com\/.*id=)[a-zA-Z0-9_-]+/.test(url);
 };
 
-// User Routes
 app.get("/", (req, res) => {
     res.json("hello world");
 });
@@ -201,7 +184,7 @@ app.post(
                 httpOnly: true,
                 secure: process.env.NODE_ENV === 'production',
                 sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
-                maxAge: 15 * 24 * 60 * 60 * 1000, // 15 days
+                maxAge: 15 * 24 * 60 * 60 * 1000,
                 path: '/',
             };
             res.cookie('token', token, cookieOptions);
@@ -304,7 +287,6 @@ app.post('/api/users/logout', (req, res) => {
     res.json({ message: 'Logout successful' });
 });
 
-// Note Routes (used for both notes and important links)
 app.post(
     '/api/notes',
     authMiddleware,
@@ -313,7 +295,6 @@ app.post(
         body('title').notEmpty().withMessage('Title is required'),
         body('semester').optional().notEmpty().withMessage('Semester cannot be empty'),
         body('courseNo').optional().notEmpty().withMessage('Course number cannot be empty'),
-        body('fileType').isIn(['pdf', 'ppt', 'pptx', 'doc', 'docx']).withMessage('Invalid file type'),
         body('fileUrl').notEmpty().withMessage('Google Drive URL is required')
             .custom((value) => isValidGoogleDriveUrl(value)).withMessage('Invalid Google Drive URL'),
         body('isImportantLink').optional().isBoolean().withMessage('isImportantLink must be a boolean'),
@@ -323,15 +304,13 @@ app.post(
         if (!errors.isEmpty()) {
             return res.status(400).json({ errors: errors.array() });
         }
-        const { title, semester, courseNo, fileType, fileUrl, isImportantLink } = req.body;
+        const { title, semester, courseNo, fileUrl, isImportantLink } = req.body;
         try {
-            // Removed canAnnounce check to allow all authenticated users to upload important links
             const note = new Note({
                 userId: req.user._id,
                 title,
                 semester,
                 courseNo,
-                fileType,
                 fileUrl,
                 isImportantLink: isImportantLink || false,
             });
@@ -353,7 +332,6 @@ app.put(
         body('title').optional().notEmpty().withMessage('Title cannot be empty'),
         body('semester').optional().notEmpty().withMessage('Semester cannot be empty'),
         body('courseNo').optional().notEmpty().withMessage('Course number cannot be empty'),
-        body('fileType').optional().isIn(['pdf', 'ppt', 'pptx', 'doc', 'docx']).withMessage('Invalid file type'),
         body('fileUrl').optional().custom((value) => isValidGoogleDriveUrl(value)).withMessage('Invalid Google Drive URL'),
         body('isImportantLink').optional().isBoolean().withMessage('isImportantLink must be a boolean'),
     ],
@@ -362,7 +340,7 @@ app.put(
         if (!errors.isEmpty()) {
             return res.status(400).json({ errors: errors.array() });
         }
-        const { title, semester, courseNo, fileType, fileUrl, isImportantLink } = req.body;
+        const { title, semester, courseNo, fileUrl, isImportantLink } = req.body;
         try {
             const note = await Note.findById(req.params.id);
             if (!note) {
@@ -374,7 +352,6 @@ app.put(
             note.title = title || note.title;
             note.semester = semester || note.semester;
             note.courseNo = courseNo || note.courseNo;
-            note.fileType = fileType || note.fileType;
             if (fileUrl) {
                 note.fileUrl = fileUrl;
             }
@@ -475,7 +452,6 @@ app.delete(
     }
 );
 
-// Announcement Routes
 app.post(
     '/api/announcements',
     authMiddleware,
@@ -591,13 +567,11 @@ app.delete(
     }
 );
 
-// Global error handler
 app.use((err, req, res, next) => {
     console.error('Global error:', err.stack);
     res.status(500).json({ message: 'Internal server error', error: err.message });
 });
 
-// Bind to Render's port and host
 const port = process.env.PORT || 3000;
 app.listen(port, '0.0.0.0', () => {
     console.log(`Server is running on port ${port}`);
