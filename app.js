@@ -112,6 +112,7 @@ const noteSchema = new mongoose.Schema({
     semester: { type: String },
     courseNo: { type: String },
     fileUrl: { type: String, required: true },
+    fileType: { type: String, required: true }, // Reintroduced fileType
     isImportantLink: { type: Boolean, default: false },
     loves: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
 }, { timestamps: true });
@@ -309,6 +310,7 @@ app.post(
         body('courseNo').optional().notEmpty().withMessage('Course number cannot be empty'),
         body('fileUrl').notEmpty().withMessage('Google Drive URL is required')
             .custom(isValidGoogleDriveUrl).withMessage('Invalid Google Drive URL'),
+        body('fileType').notEmpty().withMessage('File type is required'),
         body('isImportantLink').optional().isBoolean().withMessage('isImportantLink must be a boolean'),
     ],
     async (req, res) => {
@@ -316,7 +318,7 @@ app.post(
         if (!errors.isEmpty()) {
             return res.status(400).json({ errors: errors.array() });
         }
-        const { title, semester, courseNo, fileUrl, isImportantLink } = req.body;
+        const { title, semester, courseNo, fileUrl, fileType, isImportantLink } = req.body;
         try {
             const note = new Note({
                 userId: req.user._id,
@@ -324,11 +326,12 @@ app.post(
                 semester,
                 courseNo,
                 fileUrl,
+                fileType,
                 isImportantLink: isImportantLink || false,
                 loves: [],
             });
             await note.save();
-            console.log(`Note created: title=${title}, userId=${req.user._id}`);
+            console.log(`Note created: title=${title}, userId=${req.user._id}, fileType=${fileType}`);
             res.status(201).json(note);
         } catch (err) {
             console.error('Note creation error:', err);
@@ -347,6 +350,7 @@ app.put(
         body('semester').optional().notEmpty().withMessage('Semester cannot be empty'),
         body('courseNo').optional().notEmpty().withMessage('Course number cannot be empty'),
         body('fileUrl').optional().custom(isValidGoogleDriveUrl).withMessage('Invalid Google Drive URL'),
+        body('fileType').optional().notEmpty().withMessage('File type cannot be empty'),
         body('isImportantLink').optional().isBoolean().withMessage('isImportantLink must be a boolean'),
     ],
     async (req, res) => {
@@ -354,7 +358,7 @@ app.put(
         if (!errors.isEmpty()) {
             return res.status(400).json({ errors: errors.array() });
         }
-        const { title, semester, courseNo, fileUrl, isImportantLink } = req.body;
+        const { title, semester, courseNo, fileUrl, fileType, isImportantLink } = req.body;
         try {
             const note = await Note.findById(req.params.id);
             if (!note) {
@@ -368,6 +372,9 @@ app.put(
             note.courseNo = courseNo || note.courseNo;
             if (fileUrl) {
                 note.fileUrl = fileUrl;
+            }
+            if (fileType) {
+                note.fileType = fileType;
             }
             note.isImportantLink = isImportantLink !== undefined ? isImportantLink : note.isImportantLink;
             note.updatedAt = Date.now();
