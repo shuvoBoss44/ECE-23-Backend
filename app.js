@@ -34,16 +34,44 @@ const corsOptions = {
 };
 app.use(cors(corsOptions));
 
-// Rate limiting
-const limiter = rateLimit({
+// Rate limiting configurations
+// Global rate limiter
+const globalLimiter = rateLimit({
     windowMs: 15 * 60 * 1000, // 15 minutes
-    max: 100, // Limit each IP to 100 requests
+    max: 200, // 200 requests per IP
+    message: {
+        message: 'Too many requests from this IP, please try again after 15 minutes.',
+    },
+    standardHeaders: true,
+    legacyHeaders: false,
+});
+
+// Specific rate limiter for /api/users/me
+const userMeLimiter = rateLimit({
+    windowMs: 10 * 60 * 1000, // 10 minutes
+    max: 50, // 50 requests per IP
+    message: {
+        message: 'Too many requests to fetch user data, please try again after 10 minutes.',
+    },
+    standardHeaders: true,
+    legacyHeaders: false,
+});
+
+// Specific rate limiter for /api/notes
+const notesLimiter = rateLimit({
+    windowMs: 10 * 60 * 1000, // 10 minutes
+    max: 100, // 100 requests per IP
+    message: {
+        message: 'Too many requests to notes endpoint, please try again after 10 minutes.',
+    },
+    standardHeaders: true,
+    legacyHeaders: false,
 });
 
 // Middleware
-app.use(morgan('combined')); // More detailed logs for debugging
+app.use(morgan('combined'));
 app.use(helmet());
-app.use(limiter);
+app.use(globalLimiter);
 app.use(express.json());
 app.use(cookieParser());
 
@@ -93,11 +121,11 @@ const User = mongoose.model('User', userSchema);
 const noteSchema = new mongoose.Schema({
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
     title: { type: String, required: true },
-    semester: { type: String }, // Not required for important links
-    courseNo: { type: String }, // Not required for important links
+    semester: { type: String },
+    courseNo: { type: String },
     fileType: { type: String, enum: ['pdf', 'ppt', 'pptx', 'doc', 'docx'], required: true },
     fileUrl: { type: String, required: true },
-    isImportantLink: { type: Boolean, default: false }, // New field to distinguish important links
+    isImportantLink: { type: Boolean, default: false },
 }, { timestamps: true });
 
 const Note = mongoose.model('Note', noteSchema);
@@ -114,7 +142,7 @@ const Announcement = mongoose.model('Announcement', announcementSchema);
 // Authentication Middleware
 const authMiddleware = async (req, res, next) => {
     const token = req.header('Authorization')?.replace('Bearer ', '') || req.cookies.token;
-    console.log('AuthMiddleware - Token:', token);
+    console.log('AuthMiddleware - Token:', token ? 'Present' : 'Missing');
     if (!token) {
         console.log('AuthMiddleware: No token provided');
         return res.status(401).json({ message: 'No token, authorization denied' });
@@ -231,7 +259,7 @@ app.get('/api/users', async (req, res) => {
     }
 });
 
-app.get('/api/users/me', authMiddleware, async (req, res) => {
+app.get('/api/users/me', userMeLimiter, authMiddleware, async (req, res) => {
     try {
         res.json(req.user);
     } catch (err) {
@@ -280,6 +308,7 @@ app.post('/api/users/logout', (req, res) => {
 app.post(
     '/api/notes',
     authMiddleware,
+    notesLimiter,
     [
         body('title').notEmpty().withMessage('Title is required'),
         body('semester').optional().notEmpty().withMessage('Semester cannot be empty'),
@@ -296,12 +325,7 @@ app.post(
         }
         const { title, semester, courseNo, fileType, fileUrl, isImportantLink } = req.body;
         try {
-            if (isImportantLink) {
-                const user = await User.findById(req.user.id);
-                if (!user.canAnnounce) {
-                    return res.status(403).json({ message: 'Not authorized to create important links' });
-                }
-            }
+            // Removed canAnnounce check to allow all authenticated users to upload important links
             const note = new Note({
                 userId: req.user._id,
                 title,
@@ -312,6 +336,7 @@ app.post(
                 isImportantLink: isImportantLink || false,
             });
             await note.save();
+            console.log(`Note created: isImportantLink=${isImportantLink}, userId=${req.user._id}`);
             res.status(201).json(note);
         } catch (err) {
             console.error('Note creation error:', err);
@@ -364,7 +389,7 @@ app.put(
     }
 );
 
-app.get('/api/notes', async (req, res) => {
+app.get('/api/notes', notesLimiter, async (req, res) => {
     try {
         const page = parseInt(req.query.page) || 1;
         const limit = parseInt(req.query.limit) || 10;
