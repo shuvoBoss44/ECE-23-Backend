@@ -9,6 +9,8 @@ const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const { body, param, validationResult } = require('express-validator');
 const morgan = require('morgan');
+const multer = require('multer');
+const path = require('path');
 
 dotenv.config();
 
@@ -62,6 +64,7 @@ app.use(helmet());
 app.use(globalLimiter);
 app.use(express.json());
 app.use(cookieParser());
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 // MongoDB connection
 mongoose.connect(process.env.MONGO_URI, {
@@ -73,6 +76,17 @@ mongoose.connect(process.env.MONGO_URI, {
 })
     .then(() => console.log('MongoDB connected'))
     .catch(err => console.error('MongoDB connection error:', err));
+
+// Multer Setup for file uploads
+const storage = multer.diskStorage({
+    destination: (req, file, cb) => {
+        cb(null, 'Uploads/');
+    },
+    filename: (req, file, cb) => {
+        cb(null, `${Date.now()}-${file.originalname}`);
+    },
+});
+const upload = multer({ storage });
 
 // User Schema
 const userSchema = new mongoose.Schema({
@@ -112,7 +126,7 @@ const noteSchema = new mongoose.Schema({
     semester: { type: String },
     courseNo: { type: String },
     fileUrl: { type: String, required: true },
-    fileType: { type: String, required: true }, // Reintroduced fileType
+    fileType: { type: String, required: true },
     isImportantLink: { type: Boolean, default: false },
     loves: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
 }, { timestamps: true });
@@ -130,8 +144,8 @@ const Announcement = mongoose.model('Announcement', announcementSchema);
 
 // Authentication Middleware
 const authMiddleware = async (req, res, next) => {
-    const token = req.header('Authorization')?.replace('Bearer ', '') || req.cookies.token;
-    console.log('AuthMiddleware - Token:', token ? 'Present' : 'Missing');
+    const token = req.cookies.token || req.header('Authorization')?.replace('Bearer ', '');
+    console.log('AuthMiddleware - Token source:', req.cookies.token ? 'Cookie' : req.header('Authorization') ? 'Header' : 'Missing');
     if (!token) {
         console.log('AuthMiddleware: No token provided');
         return res.status(401).json({ message: 'No token, authorization denied' });
@@ -171,6 +185,7 @@ app.post(
     async (req, res) => {
         const errors = validationResult(req);
         if (!errors.isEmpty()) {
+            console.log('Login validation errors:', errors.array());
             return res.status(400).json({ errors: errors.array() });
         }
         const { roll, password } = req.body;
@@ -219,6 +234,7 @@ app.post(
     async (req, res) => {
         const errors = validationResult(req);
         if (!errors.isEmpty()) {
+            console.log('Password update validation errors:', errors.array());
             return res.status(400).json({ errors: errors.array() });
         }
         const { currentPassword, newPassword } = req.body;
@@ -226,13 +242,15 @@ app.post(
             const user = await User.findById(req.user._id);
             const isMatch = await user.comparePassword(currentPassword);
             if (!isMatch) {
+                console.log('Password update failed: Incorrect current password for user:', req.user.roll);
                 return res.status(400).json({ message: 'Current password is incorrect' });
             }
-            user.password = newPassword; // Will be hashed by pre-save hook
+            user.password = newPassword;
             await user.save();
+            console.log('Password updated for user:', req.user.roll);
             res.json({ message: 'Password updated successfully' });
         } catch (err) {
-            console.error('Password update error:', err);
+            console.error('Password update error:', err.message);
             res.status(500).json({ message: 'Server error' });
         }
     }
@@ -256,7 +274,7 @@ app.get('/api/users/me', userMeLimiter, authMiddleware, async (req, res) => {
     try {
         res.json(req.user);
     } catch (err) {
-        console.error('User fetch error:', err);
+        console.error('User fetch error:', err.message);
         res.status(500).json({ message: 'Server error' });
     }
 });
@@ -304,18 +322,27 @@ app.post(
     '/api/notes',
     authMiddleware,
     notesLimiter,
+    upload.single('file'),
     [
         body('title').notEmpty().withMessage('Title is required'),
-        body('semester').optional().notEmpty().withMessage('Semester cannot be empty'),
-        body('courseNo').optional().notEmpty().withMessage('Course number cannot be empty'),
-        body('fileUrl').notEmpty().withMessage('Google Drive URL is required')
-            .custom(isValidGoogleDriveUrl).withMessage('Invalid Google Drive URL'),
-        body('fileType').notEmpty().withMessage('File type is required'),
+        body('semester').optional().isString().withMessage('Semester must be a string'),
+        body('courseNo').optional().isString().withMessage('Course number must be a string'),
+        body('fileUrl').optional().custom((value, { req }) => {
+            if (!value && !req.file) {
+                throw new Error('Either file or Google Drive URL is required');
+            }
+            if (value && !isValidGoogleDriveUrl(value)) {
+                throw new Error('Invalid Google Drive URL');
+            }
+            return true;
+        }),
+        body('fileType').optional().notEmpty().withMessage('File type cannot be empty'),
         body('isImportantLink').optional().isBoolean().withMessage('isImportantLink must be a boolean'),
     ],
     async (req, res) => {
         const errors = validationResult(req);
         if (!errors.isEmpty()) {
+            console.log('Note creation validation errors:', errors.array());
             return res.status(400).json({ errors: errors.array() });
         }
         const { title, semester, courseNo, fileUrl, fileType, isImportantLink } = req.body;
@@ -325,16 +352,16 @@ app.post(
                 title,
                 semester,
                 courseNo,
-                fileUrl,
-                fileType,
+                fileUrl: req.file ? `/uploads/${req.file.filename}` : fileUrl,
+                fileType: req.file ? req.file.mimetype.split('/')[1] : fileType,
                 isImportantLink: isImportantLink || false,
                 loves: [],
             });
             await note.save();
-            console.log(`Note created: title=${title}, userId=${req.user._id}, fileType=${fileType}`);
+            console.log(`Note created: title=${title}, userId=${req.user._id}, fileType=${note.fileType}`);
             res.status(201).json(note);
         } catch (err) {
-            console.error('Note creation error:', err);
+            console.error('Note creation error:', err.message);
             res.status(400).json({ message: 'Server error' });
         }
     }
@@ -344,11 +371,12 @@ app.post(
 app.put(
     '/api/notes/:id',
     authMiddleware,
+    upload.single('file'),
     [
         param('id').isMongoId().withMessage('Invalid note ID'),
         body('title').optional().notEmpty().withMessage('Title cannot be empty'),
-        body('semester').optional().notEmpty().withMessage('Semester cannot be empty'),
-        body('courseNo').optional().notEmpty().withMessage('Course number cannot be empty'),
+        body('semester').optional().isString().withMessage('Semester must be a string'),
+        body('courseNo').optional().isString().withMessage('Course number must be a string'),
         body('fileUrl').optional().custom(isValidGoogleDriveUrl).withMessage('Invalid Google Drive URL'),
         body('fileType').optional().notEmpty().withMessage('File type cannot be empty'),
         body('isImportantLink').optional().isBoolean().withMessage('isImportantLink must be a boolean'),
@@ -356,32 +384,32 @@ app.put(
     async (req, res) => {
         const errors = validationResult(req);
         if (!errors.isEmpty()) {
+            console.log('Note update validation errors:', errors.array());
             return res.status(400).json({ errors: errors.array() });
         }
         const { title, semester, courseNo, fileUrl, fileType, isImportantLink } = req.body;
         try {
             const note = await Note.findById(req.params.id);
             if (!note) {
+                console.log('Note update: Note not found for id:', req.params.id);
                 return res.status(404).json({ message: 'Note not found' });
             }
             if (note.userId.toString() !== req.user._id.toString()) {
+                console.log('Note update: Unauthorized user:', req.user._id);
                 return res.status(403).json({ message: 'Not authorized to update this note' });
             }
             note.title = title || note.title;
-            note.semester = semester || note.semester;
-            note.courseNo = courseNo || note.courseNo;
-            if (fileUrl) {
-                note.fileUrl = fileUrl;
-            }
-            if (fileType) {
-                note.fileType = fileType;
-            }
+            note.semester = semester !== undefined ? semester : note.semester;
+            note.courseNo = courseNo !== undefined ? courseNo : note.courseNo;
+            note.fileUrl = req.file ? `/uploads/${req.file.filename}` : fileUrl || note.fileUrl;
+            note.fileType = req.file ? req.file.mimetype.split('/')[1] : fileType || note.fileType;
             note.isImportantLink = isImportantLink !== undefined ? isImportantLink : note.isImportantLink;
             note.updatedAt = Date.now();
             await note.save();
+            console.log(`Note updated: id=${req.params.id}, userId=${req.user._id}`);
             res.json(note);
         } catch (err) {
-            console.error('Note update error:', err);
+            console.error('Note update error:', err.message);
             res.status(400).json({ message: 'Server error' });
         }
     }
@@ -395,11 +423,13 @@ app.post(
     async (req, res) => {
         const errors = validationResult(req);
         if (!errors.isEmpty()) {
+            console.log('Love toggle validation errors:', errors.array());
             return res.status(400).json({ errors: errors.array() });
         }
         try {
             const note = await Note.findById(req.params.id);
             if (!note) {
+                console.log('Love toggle: Note not found for id:', req.params.id);
                 return res.status(404).json({ message: 'Note not found' });
             }
             const userId = req.user._id.toString();
@@ -413,7 +443,7 @@ app.post(
             console.log(`Love toggled: noteId=${req.params.id}, userId=${userId}, loved=${!hasLoved}`);
             res.json(note);
         } catch (err) {
-            console.error('Love toggle error:', err);
+            console.error('Love toggle error:', err.message);
             res.status(500).json({ message: 'Server error' });
         }
     }
@@ -425,11 +455,17 @@ app.get('/api/notes', notesLimiter, async (req, res) => {
         const page = parseInt(req.query.page) || 1;
         const limit = parseInt(req.query.limit) || 10;
         const skip = (page - 1) * limit;
-        const { semester, courseNo, isImportantLink } = req.query;
+        const { semester, courseNo, isImportantLink, search } = req.query;
         const query = {};
         if (semester) query.semester = semester;
         if (courseNo) query.courseNo = courseNo;
         if (isImportantLink !== undefined) query.isImportantLink = isImportantLink === 'true';
+        if (search) {
+            query.$or = [
+                { title: { $regex: search, $options: 'i' } },
+                { courseNo: { $regex: search, $options: 'i' } },
+            ];
+        }
         console.log('Notes query:', { page, limit, skip, query });
         const notes = await Note.find(query)
             .populate('userId', 'name roll')
@@ -444,7 +480,7 @@ app.get('/api/notes', notesLimiter, async (req, res) => {
             pages: Math.ceil(total / limit),
         });
     } catch (err) {
-        console.error('Notes fetch error:', err);
+        console.error('Notes fetch error:', err.message);
         res.status(500).json({ message: 'Server error' });
     }
 });
@@ -456,6 +492,7 @@ app.get(
     async (req, res) => {
         const errors = validationResult(req);
         if (!errors.isEmpty()) {
+            console.log('User notes fetch validation errors:', errors.array());
             return res.status(400).json({ errors: errors.array() });
         }
         try {
@@ -475,7 +512,7 @@ app.get(
                 pages: Math.ceil(total / limit),
             });
         } catch (err) {
-            console.error('User notes fetch error:', err);
+            console.error('User notes fetch error:', err.message);
             res.status(500).json({ message: 'Server error' });
         }
     }
@@ -489,21 +526,24 @@ app.delete(
     async (req, res) => {
         const errors = validationResult(req);
         if (!errors.isEmpty()) {
+            console.log('Note delete validation errors:', errors.array());
             return res.status(400).json({ errors: errors.array() });
         }
         try {
             const note = await Note.findById(req.params.id);
             if (!note) {
+                console.log('Note delete: Note not found for id:', req.params.id);
                 return res.status(404).json({ message: 'Note not found' });
             }
             if (note.userId.toString() !== req.user._id.toString()) {
+                console.log('Note delete: Unauthorized user:', req.user._id);
                 return res.status(403).json({ message: 'Not authorized to delete this note' });
             }
             await Note.findByIdAndDelete(req.params.id);
             console.log(`Note deleted: id=${req.params.id}, userId=${req.user._id}`);
             res.json({ message: 'Note deleted' });
         } catch (err) {
-            console.error('Note delete error:', err);
+            console.error('Note delete error:', err.message);
             res.status(500).json({ message: 'Server error' });
         }
     }
@@ -520,11 +560,13 @@ app.post(
     async (req, res) => {
         const errors = validationResult(req);
         if (!errors.isEmpty()) {
+            console.log('Announcement creation validation errors:', errors.array());
             return res.status(400).json({ errors: errors.array() });
         }
         try {
             const user = await User.findById(req.user._id);
             if (!user.canAnnounce) {
+                console.log('Announcement creation: Unauthorized user:', req.user._id);
                 return res.status(403).json({ message: 'Not authorized to create announcements' });
             }
             const { title, content } = req.body;
@@ -537,7 +579,7 @@ app.post(
             console.log(`Announcement created: title=${title}, creator=${req.user._id}`);
             res.status(201).json(announcement);
         } catch (err) {
-            console.error('Announcement creation error:', err);
+            console.error('Announcement creation error:', err.message);
             res.status(500).json({ message: 'Server error' });
         }
     }
@@ -562,7 +604,7 @@ app.get('/api/announcements', async (req, res) => {
             pages: Math.ceil(total / limit),
         });
     } catch (err) {
-        console.error('Announcements fetch error:', err);
+        console.error('Announcements fetch error:', err.message);
         res.status(500).json({ message: 'Server error' });
     }
 });
@@ -579,14 +621,17 @@ app.put(
     async (req, res) => {
         const errors = validationResult(req);
         if (!errors.isEmpty()) {
+            console.log('Announcement update validation errors:', errors.array());
             return res.status(400).json({ errors: errors.array() });
         }
         try {
             const announcement = await Announcement.findById(req.params.id);
             if (!announcement) {
+                console.log('Announcement update: Announcement not found for id:', req.params.id);
                 return res.status(404).json({ message: 'Announcement not found' });
             }
             if (announcement.creator.toString() !== req.user._id.toString()) {
+                console.log('Announcement update: Unauthorized user:', req.user._id);
                 return res.status(403).json({ message: 'Not authorized to update this announcement' });
             }
             const { title, content } = req.body;
@@ -597,7 +642,7 @@ app.put(
             console.log(`Announcement updated: id=${req.params.id}, creator=${req.user._id}`);
             res.json(announcement);
         } catch (err) {
-            console.error('Announcement update error:', err);
+            console.error('Announcement update error:', err.message);
             res.status(500).json({ message: 'Server error' });
         }
     }
@@ -611,21 +656,24 @@ app.delete(
     async (req, res) => {
         const errors = validationResult(req);
         if (!errors.isEmpty()) {
+            console.log('Announcement delete validation errors:', errors.array());
             return res.status(400).json({ errors: errors.array() });
         }
         try {
             const announcement = await Announcement.findById(req.params.id);
             if (!announcement) {
+                console.log('Announcement delete: Announcement not found for id:', req.params.id);
                 return res.status(404).json({ message: 'Announcement not found' });
             }
             if (announcement.creator.toString() !== req.user._id.toString()) {
+                console.log('Announcement delete: Unauthorized user:', req.user._id);
                 return res.status(403).json({ message: 'Not authorized to delete this announcement' });
             }
             await Announcement.findByIdAndDelete(req.params.id);
             console.log(`Announcement deleted: id=${req.params.id}, creator=${req.user._id}`);
             res.json({ message: 'Announcement deleted' });
         } catch (err) {
-            console.error('Announcement delete error:', err);
+            console.error('Announcement delete error:', err.message);
             res.status(500).json({ message: 'Server error' });
         }
     }
