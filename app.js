@@ -19,6 +19,7 @@ console.log('NODE_ENV:', process.env.NODE_ENV || 'development');
 
 const app = express();
 
+// CORS configuration
 const corsOptions = {
     origin: process.env.NODE_ENV === 'production'
         ? ['https://ece-23.vercel.app', 'https://yourapp.onrender.com']
@@ -30,12 +31,11 @@ const corsOptions = {
 };
 app.use(cors(corsOptions));
 
+// Rate limiters
 const globalLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
     max: 200,
-    message: {
-        message: 'Too many requests from this IP, please try again after 15 minutes.',
-    },
+    message: { message: 'Too many requests from this IP, please try again after 15 minutes.' },
     standardHeaders: true,
     legacyHeaders: false,
 });
@@ -43,9 +43,7 @@ const globalLimiter = rateLimit({
 const userMeLimiter = rateLimit({
     windowMs: 10 * 60 * 1000,
     max: 50,
-    message: {
-        message: 'Too many requests to fetch user data, please try again after 10 minutes.',
-    },
+    message: { message: 'Too many requests to fetch user data, please try again after 10 minutes.' },
     standardHeaders: true,
     legacyHeaders: false,
 });
@@ -53,19 +51,19 @@ const userMeLimiter = rateLimit({
 const notesLimiter = rateLimit({
     windowMs: 10 * 60 * 1000,
     max: 100,
-    message: {
-        message: 'Too many requests to notes endpoint, please try again after 10 minutes.',
-    },
+    message: { message: 'Too many requests to notes endpoint, please try again after 10 minutes.' },
     standardHeaders: true,
     legacyHeaders: false,
 });
 
+// Middleware
 app.use(morgan('combined'));
 app.use(helmet());
 app.use(globalLimiter);
 app.use(express.json());
 app.use(cookieParser());
 
+// MongoDB connection
 mongoose.connect(process.env.MONGO_URI, {
     connectTimeoutMS: 10000,
     socketTimeoutMS: 45000,
@@ -76,6 +74,7 @@ mongoose.connect(process.env.MONGO_URI, {
     .then(() => console.log('MongoDB connected'))
     .catch(err => console.error('MongoDB connection error:', err));
 
+// User Schema
 const userSchema = new mongoose.Schema({
     name: { type: String, required: true },
     roll: { type: String, required: true, unique: true },
@@ -94,8 +93,8 @@ const userSchema = new mongoose.Schema({
     canAnnounce: { type: Boolean, default: false },
 }, { timestamps: true });
 
-userSchema.pre("save", async function (next) {
-    if (!this.isModified("password")) return next();
+userSchema.pre('save', async function (next) {
+    if (!this.isModified('password')) return next();
     this.password = await bcrypt.hash(this.password, 10);
     next();
 });
@@ -106,6 +105,7 @@ userSchema.methods.comparePassword = async function (password) {
 
 const User = mongoose.model('User', userSchema);
 
+// Note Schema
 const noteSchema = new mongoose.Schema({
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
     title: { type: String, required: true },
@@ -113,10 +113,12 @@ const noteSchema = new mongoose.Schema({
     courseNo: { type: String },
     fileUrl: { type: String, required: true },
     isImportantLink: { type: Boolean, default: false },
+    loves: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
 }, { timestamps: true });
 
 const Note = mongoose.model('Note', noteSchema);
 
+// Announcement Schema
 const announcementSchema = new mongoose.Schema({
     title: { type: String, required: true, trim: true },
     content: { type: String, required: true, trim: true },
@@ -125,6 +127,7 @@ const announcementSchema = new mongoose.Schema({
 
 const Announcement = mongoose.model('Announcement', announcementSchema);
 
+// Authentication Middleware
 const authMiddleware = async (req, res, next) => {
     const token = req.header('Authorization')?.replace('Bearer ', '') || req.cookies.token;
     console.log('AuthMiddleware - Token:', token ? 'Present' : 'Missing');
@@ -147,14 +150,17 @@ const authMiddleware = async (req, res, next) => {
     }
 };
 
+// Google Drive URL Validator
 const isValidGoogleDriveUrl = (url) => {
     return /^https:\/\/(drive\.google\.com\/file\/d\/|docs\.google\.com\/.*id=)[a-zA-Z0-9_-]+/.test(url);
 };
 
-app.get("/", (req, res) => {
-    res.json("hello world");
+// Routes
+app.get('/', (req, res) => {
+    res.json('Hello World');
 });
 
+// User Login
 app.post(
     '/api/users/login',
     [
@@ -201,6 +207,7 @@ app.post(
     }
 );
 
+// Update Password
 app.post(
     '/api/users/update-password',
     authMiddleware,
@@ -220,16 +227,17 @@ app.post(
             if (!isMatch) {
                 return res.status(400).json({ message: 'Current password is incorrect' });
             }
-            user.password = await bcrypt.hash(newPassword, 10);
+            user.password = newPassword; // Will be hashed by pre-save hook
             await user.save();
             res.json({ message: 'Password updated successfully' });
         } catch (err) {
             console.error('Password update error:', err);
-            res.status(500).json({ message: err.message });
+            res.status(500).json({ message: 'Server error' });
         }
     }
 );
 
+// Get All Users
 app.get('/api/users', async (req, res) => {
     console.log('Fetching users...');
     try {
@@ -237,20 +245,22 @@ app.get('/api/users', async (req, res) => {
         console.log('Users fetched:', users.length);
         res.json(users);
     } catch (err) {
-        console.error('Users fetch error:', err.message, err.stack);
-        res.status(500).json({ message: err.message });
+        console.error('Users fetch error:', err.message);
+        res.status(500).json({ message: 'Server error' });
     }
 });
 
+// Get Current User
 app.get('/api/users/me', userMeLimiter, authMiddleware, async (req, res) => {
     try {
         res.json(req.user);
     } catch (err) {
         console.error('User fetch error:', err);
-        res.status(500).json({ message: err.message });
+        res.status(500).json({ message: 'Server error' });
     }
 });
 
+// Get User by Roll
 app.get(
     '/api/users/:roll',
     [param('roll').notEmpty().withMessage('Roll is required')],
@@ -276,6 +286,7 @@ app.get(
     }
 );
 
+// User Logout
 app.post('/api/users/logout', (req, res) => {
     res.clearCookie('token', {
         httpOnly: true,
@@ -287,6 +298,7 @@ app.post('/api/users/logout', (req, res) => {
     res.json({ message: 'Logout successful' });
 });
 
+// Create Note
 app.post(
     '/api/notes',
     authMiddleware,
@@ -296,7 +308,7 @@ app.post(
         body('semester').optional().notEmpty().withMessage('Semester cannot be empty'),
         body('courseNo').optional().notEmpty().withMessage('Course number cannot be empty'),
         body('fileUrl').notEmpty().withMessage('Google Drive URL is required')
-            .custom((value) => isValidGoogleDriveUrl(value)).withMessage('Invalid Google Drive URL'),
+            .custom(isValidGoogleDriveUrl).withMessage('Invalid Google Drive URL'),
         body('isImportantLink').optional().isBoolean().withMessage('isImportantLink must be a boolean'),
     ],
     async (req, res) => {
@@ -313,17 +325,19 @@ app.post(
                 courseNo,
                 fileUrl,
                 isImportantLink: isImportantLink || false,
+                loves: [],
             });
             await note.save();
-            console.log(`Note created: isImportantLink=${isImportantLink}, userId=${req.user._id}`);
+            console.log(`Note created: title=${title}, userId=${req.user._id}`);
             res.status(201).json(note);
         } catch (err) {
             console.error('Note creation error:', err);
-            res.status(400).json({ message: err.message });
+            res.status(400).json({ message: 'Server error' });
         }
     }
 );
 
+// Update Note
 app.put(
     '/api/notes/:id',
     authMiddleware,
@@ -332,7 +346,7 @@ app.put(
         body('title').optional().notEmpty().withMessage('Title cannot be empty'),
         body('semester').optional().notEmpty().withMessage('Semester cannot be empty'),
         body('courseNo').optional().notEmpty().withMessage('Course number cannot be empty'),
-        body('fileUrl').optional().custom((value) => isValidGoogleDriveUrl(value)).withMessage('Invalid Google Drive URL'),
+        body('fileUrl').optional().custom(isValidGoogleDriveUrl).withMessage('Invalid Google Drive URL'),
         body('isImportantLink').optional().isBoolean().withMessage('isImportantLink must be a boolean'),
     ],
     async (req, res) => {
@@ -361,11 +375,44 @@ app.put(
             res.json(note);
         } catch (err) {
             console.error('Note update error:', err);
-            res.status(400).json({ message: err.message });
+            res.status(400).json({ message: 'Server error' });
         }
     }
 );
 
+// Toggle Love on Note
+app.post(
+    '/api/notes/:id/love',
+    authMiddleware,
+    [param('id').isMongoId().withMessage('Invalid note ID')],
+    async (req, res) => {
+        const errors = validationResult(req);
+        if (!errors.isEmpty()) {
+            return res.status(400).json({ errors: errors.array() });
+        }
+        try {
+            const note = await Note.findById(req.params.id);
+            if (!note) {
+                return res.status(404).json({ message: 'Note not found' });
+            }
+            const userId = req.user._id.toString();
+            const hasLoved = note.loves.includes(userId);
+            if (hasLoved) {
+                note.loves = note.loves.filter((id) => id.toString() !== userId);
+            } else {
+                note.loves.push(userId);
+            }
+            await note.save();
+            console.log(`Love toggled: noteId=${req.params.id}, userId=${userId}, loved=${!hasLoved}`);
+            res.json(note);
+        } catch (err) {
+            console.error('Love toggle error:', err);
+            res.status(500).json({ message: 'Server error' });
+        }
+    }
+);
+
+// Get Notes
 app.get('/api/notes', notesLimiter, async (req, res) => {
     try {
         const page = parseInt(req.query.page) || 1;
@@ -391,10 +438,11 @@ app.get('/api/notes', notesLimiter, async (req, res) => {
         });
     } catch (err) {
         console.error('Notes fetch error:', err);
-        res.status(500).json({ message: err.message });
+        res.status(500).json({ message: 'Server error' });
     }
 });
 
+// Get Notes by User
 app.get(
     '/api/notes/:userId',
     [param('userId').isMongoId().withMessage('Invalid user ID')],
@@ -421,11 +469,12 @@ app.get(
             });
         } catch (err) {
             console.error('User notes fetch error:', err);
-            res.status(500).json({ message: err.message });
+            res.status(500).json({ message: 'Server error' });
         }
     }
 );
 
+// Delete Note
 app.delete(
     '/api/notes/:id',
     authMiddleware,
@@ -444,14 +493,16 @@ app.delete(
                 return res.status(403).json({ message: 'Not authorized to delete this note' });
             }
             await Note.findByIdAndDelete(req.params.id);
+            console.log(`Note deleted: id=${req.params.id}, userId=${req.user._id}`);
             res.json({ message: 'Note deleted' });
         } catch (err) {
             console.error('Note delete error:', err);
-            res.status(500).json({ message: err.message });
+            res.status(500).json({ message: 'Server error' });
         }
     }
 );
 
+// Create Announcement
 app.post(
     '/api/announcements',
     authMiddleware,
@@ -465,7 +516,7 @@ app.post(
             return res.status(400).json({ errors: errors.array() });
         }
         try {
-            const user = await User.findById(req.user.id);
+            const user = await User.findById(req.user._id);
             if (!user.canAnnounce) {
                 return res.status(403).json({ message: 'Not authorized to create announcements' });
             }
@@ -473,9 +524,10 @@ app.post(
             const announcement = new Announcement({
                 title,
                 content,
-                creator: req.user.id,
+                creator: req.user._id,
             });
             await announcement.save();
+            console.log(`Announcement created: title=${title}, creator=${req.user._id}`);
             res.status(201).json(announcement);
         } catch (err) {
             console.error('Announcement creation error:', err);
@@ -484,6 +536,7 @@ app.post(
     }
 );
 
+// Get Announcements
 app.get('/api/announcements', async (req, res) => {
     try {
         const page = parseInt(req.query.page) || 1;
@@ -507,6 +560,7 @@ app.get('/api/announcements', async (req, res) => {
     }
 });
 
+// Update Announcement
 app.put(
     '/api/announcements/:id',
     authMiddleware,
@@ -525,7 +579,7 @@ app.put(
             if (!announcement) {
                 return res.status(404).json({ message: 'Announcement not found' });
             }
-            if (announcement.creator.toString() !== req.user.id.toString()) {
+            if (announcement.creator.toString() !== req.user._id.toString()) {
                 return res.status(403).json({ message: 'Not authorized to update this announcement' });
             }
             const { title, content } = req.body;
@@ -533,6 +587,7 @@ app.put(
             announcement.content = content || announcement.content;
             announcement.updatedAt = Date.now();
             await announcement.save();
+            console.log(`Announcement updated: id=${req.params.id}, creator=${req.user._id}`);
             res.json(announcement);
         } catch (err) {
             console.error('Announcement update error:', err);
@@ -541,6 +596,7 @@ app.put(
     }
 );
 
+// Delete Announcement
 app.delete(
     '/api/announcements/:id',
     authMiddleware,
@@ -555,10 +611,11 @@ app.delete(
             if (!announcement) {
                 return res.status(404).json({ message: 'Announcement not found' });
             }
-            if (announcement.creator.toString() !== req.user.id.toString()) {
+            if (announcement.creator.toString() !== req.user._id.toString()) {
                 return res.status(403).json({ message: 'Not authorized to delete this announcement' });
             }
             await Announcement.findByIdAndDelete(req.params.id);
+            console.log(`Announcement deleted: id=${req.params.id}, creator=${req.user._id}`);
             res.json({ message: 'Announcement deleted' });
         } catch (err) {
             console.error('Announcement delete error:', err);
@@ -567,14 +624,8 @@ app.delete(
     }
 );
 
-app.use((err, req, res, next) => {
-    console.error('Global error:', err.stack);
-    res.status(500).json({ message: 'Internal server error', error: err.message });
+// Start Server
+const PORT = process.env.PORT || 5000;
+app.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
 });
-
-const port = process.env.PORT || 3000;
-app.listen(port, '0.0.0.0', () => {
-    console.log(`Server is running on port ${port}`);
-});
-
-module.exports = app;
