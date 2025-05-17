@@ -89,16 +89,26 @@ userSchema.methods.comparePassword = async function (password) {
 
 const User = mongoose.model('User', userSchema);
 
-// Note Schema
+// Note Schema with fileType
 const noteSchema = new mongoose.Schema({
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
     title: { type: String, required: true },
     semester: { type: String, required: true },
     courseNo: { type: String, required: true },
-    pdf: { type: String, required: true },
+    fileType: { type: String, enum: ['pdf', 'ppt', 'pptx', 'doc', 'docx'], required: true },
+    fileUrl: { type: String, required: true },
 }, { timestamps: true });
 
 const Note = mongoose.model('Note', noteSchema);
+
+// Important Link Schema
+const importantLinkSchema = new mongoose.Schema({
+    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+    title: { type: String, required: true },
+    link: { type: String, required: true },
+}, { timestamps: true });
+
+const ImportantLink = mongoose.model('ImportantLink', importantLinkSchema);
 
 // Announcement Schema
 const announcementSchema = new mongoose.Schema({
@@ -282,7 +292,8 @@ app.post(
         body('title').notEmpty().withMessage('Title is required'),
         body('semester').notEmpty().withMessage('Semester is required'),
         body('courseNo').notEmpty().withMessage('Course number is required'),
-        body('pdf').notEmpty().withMessage('Google Drive URL is required')
+        body('fileType').isIn(['pdf', 'ppt', 'pptx', 'doc', 'docx']).withMessage('Invalid file type'),
+        body('fileUrl').notEmpty().withMessage('Google Drive URL is required')
             .custom((value) => isValidGoogleDriveUrl(value)).withMessage('Invalid Google Drive URL'),
     ],
     async (req, res) => {
@@ -290,14 +301,15 @@ app.post(
         if (!errors.isEmpty()) {
             return res.status(400).json({ errors: errors.array() });
         }
-        const { title, semester, courseNo, pdf } = req.body;
+        const { title, semester, courseNo, fileType, fileUrl } = req.body;
         try {
             const note = new Note({
                 userId: req.user._id,
                 title,
                 semester,
                 courseNo,
-                pdf,
+                fileType,
+                fileUrl,
             });
             await note.save();
             res.status(201).json(note);
@@ -316,14 +328,15 @@ app.put(
         body('title').optional().notEmpty().withMessage('Title cannot be empty'),
         body('semester').optional().notEmpty().withMessage('Semester cannot be empty'),
         body('courseNo').optional().notEmpty().withMessage('Course number cannot be empty'),
-        body('pdf').optional().custom((value) => isValidGoogleDriveUrl(value)).withMessage('Invalid Google Drive URL'),
+        body('fileType').optional().isIn(['pdf', 'ppt', 'pptx', 'doc', 'docx']).withMessage('Invalid file type'),
+        body('fileUrl').optional().custom((value) => isValidGoogleDriveUrl(value)).withMessage('Invalid Google Drive URL'),
     ],
     async (req, res) => {
         const errors = validationResult(req);
         if (!errors.isEmpty()) {
             return res.status(400).json({ errors: errors.array() });
         }
-        const { title, semester, courseNo, pdf } = req.body;
+        const { title, semester, courseNo, fileType, fileUrl } = req.body;
         try {
             const note = await Note.findById(req.params.id);
             if (!note) {
@@ -335,8 +348,9 @@ app.put(
             note.title = title || note.title;
             note.semester = semester || note.semester;
             note.courseNo = courseNo || note.courseNo;
-            if (pdf) {
-                note.pdf = pdf;
+            note.fileType = fileType || note.fileType;
+            if (fileUrl) {
+                note.fileUrl = fileUrl;
             }
             note.updatedAt = Date.now();
             await note.save();
@@ -429,6 +443,123 @@ app.delete(
         } catch (err) {
             console.error('Note delete error:', err);
             res.status(500).json({ message: err.message });
+        }
+    }
+);
+
+// Important Link Routes
+app.post(
+    '/api/important-links',
+    authMiddleware,
+    [
+        body('title').notEmpty().withMessage('Title is required'),
+        body('link').notEmpty().withMessage('Google Drive URL is required')
+            .custom((value) => isValidGoogleDriveUrl(value)).withMessage('Invalid Google Drive URL'),
+    ],
+    async (req, res) => {
+        const errors = validationResult(req);
+        if (!errors.isEmpty()) {
+            return res.status(400).json({ errors: errors.array() });
+        }
+        try {
+            const user = await User.findById(req.user.id);
+            if (!user.canAnnounce) {
+                return res.status(403).json({ message: 'Not authorized to create important links' });
+            }
+            const { title, link } = req.body;
+            const importantLink = new ImportantLink({
+                userId: req.user.id,
+                title,
+                link,
+            });
+            await importantLink.save();
+            res.status(201).json(importantLink);
+        } catch (err) {
+            console.error('Important link creation error:', err);
+            res.status(500).json({ message: 'Server error' });
+        }
+    }
+);
+
+app.get('/api/important-links', async (req, res) => {
+    try {
+        const page = parseInt(req.query.page) || 1;
+        const limit = parseInt(req.query.limit) || 10;
+        const skip = (page - 1) * limit;
+        const importantLinks = await ImportantLink.find()
+            .populate('userId', 'name roll')
+            .skip(skip)
+            .limit(limit)
+            .sort({ createdAt: -1 });
+        const total = await ImportantLink.countDocuments();
+        res.json({
+            importantLinks,
+            total,
+            page,
+            pages: Math.ceil(total / limit),
+        });
+    } catch (err) {
+        console.error('Important links fetch error:', err);
+        res.status(500).json({ message: 'Server error' });
+    }
+});
+
+app.put(
+    '/api/important-links/:id',
+    authMiddleware,
+    [
+        param('id').isMongoId().withMessage('Invalid important link ID'),
+        body('title').optional().notEmpty().withMessage('Title cannot be empty'),
+        body('link').optional().custom((value) => isValidGoogleDriveUrl(value)).withMessage('Invalid Google Drive URL'),
+    ],
+    async (req, res) => {
+        const errors = validationResult(req);
+        if (!errors.isEmpty()) {
+            return res.status(400).json({ errors: errors.array() });
+        }
+        try {
+            const importantLink = await ImportantLink.findById(req.params.id);
+            if (!importantLink) {
+                return res.status(404).json({ message: 'Important link not found' });
+            }
+            if (importantLink.userId.toString() !== req.user.id.toString()) {
+                return res.status(403).json({ message: 'Not authorized to update this important link' });
+            }
+            const { title, link } = req.body;
+            importantLink.title = title || importantLink.title;
+            importantLink.link = link || importantLink.link;
+            importantLink.updatedAt = Date.now();
+            await importantLink.save();
+            res.json(importantLink);
+        } catch (err) {
+            console.error('Important link update error:', err);
+            res.status(500).json({ message: 'Server error' });
+        }
+    }
+);
+
+app.delete(
+    '/api/important-links/:id',
+    authMiddleware,
+    [param('id').isMongoId().withMessage('Invalid important link ID')],
+    async (req, res) => {
+        const errors = validationResult(req);
+        if (!errors.isEmpty()) {
+            return res.status(400).json({ errors: errors.array() });
+        }
+        try {
+            const importantLink = await ImportantLink.findById(req.params.id);
+            if (!importantLink) {
+                return res.status(404).json({ message: 'Important link not found' });
+            }
+            if (importantLink.userId.toString() !== req.user.id.toString()) {
+                return res.status(403).json({ message: 'Not authorized to delete this important link' });
+            }
+            await ImportantLink.findByIdAndDelete(req.params.id);
+            res.json({ message: 'Important link deleted' });
+        } catch (err) {
+            console.error('Important link delete error:', err);
+            res.status(500).json({ message: 'Server error' });
         }
     }
 );
@@ -552,7 +683,7 @@ app.delete(
 // Global error handler
 app.use((err, req, res, next) => {
     console.error('Global error:', err.stack);
-    res.status(500).json({ message: 'Internal server error', error: err.message }); // Include error for debugging
+    res.status(500).json({ message: 'Internal server error', error: err.message });
 });
 
 // Bind to Render's port and host
