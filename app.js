@@ -64,7 +64,7 @@ app.use(helmet());
 app.use(globalLimiter);
 app.use(express.json());
 app.use(cookieParser());
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+app.use('/uploads', express.static(path.join(__dirname, 'Uploads')));
 
 // MongoDB connection
 mongoose.connect(process.env.MONGO_URI, {
@@ -165,9 +165,14 @@ const authMiddleware = async (req, res, next) => {
     }
 };
 
-// Google Drive URL Validator
-const isValidGoogleDriveUrl = (url) => {
-    return /^https:\/\/(drive\.google\.com\/file\/d\/|docs\.google\.com\/.*id=)[a-zA-Z0-9_-]+/.test(url);
+// Generic URL Validator
+const isValidUrl = (url) => {
+    try {
+        new URL(url);
+        return true;
+    } catch {
+        return false;
+    }
 };
 
 // Routes
@@ -329,10 +334,10 @@ app.post(
         body('courseNo').optional().isString().withMessage('Course number must be a string'),
         body('fileUrl').optional().custom((value, { req }) => {
             if (!value && !req.file) {
-                throw new Error('Either file or Google Drive URL is required');
+                throw new Error('Either file or URL is required');
             }
-            if (value && !isValidGoogleDriveUrl(value)) {
-                throw new Error('Invalid Google Drive URL');
+            if (value && !isValidUrl(value)) {
+                throw new Error('Invalid URL');
             }
             return true;
         }),
@@ -352,7 +357,7 @@ app.post(
                 title,
                 semester,
                 courseNo,
-                fileUrl: req.file ? `/uploads/${req.file.filename}` : fileUrl,
+                fileUrl: req.file ? `/Uploads/${req.file.filename}` : fileUrl,
                 fileType: req.file ? req.file.mimetype.split('/')[1] : fileType,
                 isImportantLink: isImportantLink || false,
                 loves: [],
@@ -377,7 +382,12 @@ app.put(
         body('title').optional().notEmpty().withMessage('Title cannot be empty'),
         body('semester').optional().isString().withMessage('Semester must be a string'),
         body('courseNo').optional().isString().withMessage('Course number must be a string'),
-        body('fileUrl').optional().custom(isValidGoogleDriveUrl).withMessage('Invalid Google Drive URL'),
+        body('fileUrl').optional().custom((value) => {
+            if (value && !isValidUrl(value)) {
+                throw new Error('Invalid URL');
+            }
+            return true;
+        }).withMessage('Invalid URL'),
         body('fileType').optional().notEmpty().withMessage('File type cannot be empty'),
         body('isImportantLink').optional().isBoolean().withMessage('isImportantLink must be a boolean'),
     ],
@@ -401,7 +411,7 @@ app.put(
             note.title = title || note.title;
             note.semester = semester !== undefined ? semester : note.semester;
             note.courseNo = courseNo !== undefined ? courseNo : note.courseNo;
-            note.fileUrl = req.file ? `/uploads/${req.file.filename}` : fileUrl || note.fileUrl;
+            note.fileUrl = req.file ? `/Uploads/${req.file.filename}` : fileUrl || note.fileUrl;
             note.fileType = req.file ? req.file.mimetype.split('/')[1] : fileType || note.fileType;
             note.isImportantLink = isImportantLink !== undefined ? isImportantLink : note.isImportantLink;
             note.updatedAt = Date.now();
